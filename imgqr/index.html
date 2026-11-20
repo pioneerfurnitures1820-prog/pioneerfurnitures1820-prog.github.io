@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#c4522a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ImgQR">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<title>Image → QR</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
+<style>
+:root{--bg:#faf9f7;--card:#fff;--tx:#1f1e1c;--mu:#6b6a66;--ac:#c4522a;--bd:#e4e2dc;--ok:#2f7d4f;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#1b1a18;--card:#262522;--tx:#f0eee9;--mu:#a09e97;--ac:#e8794f;--bd:#3a3834;--ok:#5fc08a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:520px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:4px 0 2px}
+.sub{color:var(--mu);margin:0 0 14px;font-size:13px}
+.tabs{display:flex;gap:6px;margin-bottom:12px}
+.tabs button{flex:1}
+button{font:inherit;padding:10px 12px;border-radius:10px;border:1px solid var(--bd);background:var(--card);color:var(--tx);cursor:pointer}
+button.on,button.pri{background:var(--ac);border-color:var(--ac);color:#fff}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:14px;margin-bottom:12px}
+label{display:block;font-size:13px;color:var(--mu);margin:8px 0 4px}
+select,input[type=range],input[type=file]{width:100%}
+select{font:inherit;padding:8px;border-radius:8px;border:1px solid var(--bd);background:var(--card);color:var(--tx)}
+canvas{max-width:100%;border-radius:8px;background:#fff}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+.row>*{flex:1}
+.stats{font-size:13px;color:var(--mu);display:grid;grid-template-columns:1fr 1fr;gap:2px 10px;margin-top:8px}
+.stats b{color:var(--tx)}
+.center{text-align:center}
+.bar{height:8px;background:var(--bd);border-radius:6px;overflow:hidden;margin:8px 0}
+.bar i{display:block;height:100%;width:0;background:var(--ac)}
+.hide{display:none}
+video{width:100%;border-radius:10px;background:#000}
+.msg{font-size:13px;color:var(--mu)}
+</style>
+</head>
+<body>
+<main>
+<h1>Image → JSON → QR</h1>
+<p class="sub">Test build · animated multi-part QR transfer, fully offline</p>
+<div class="tabs"><button id="tS" class="on">Send</button><button id="tR">Receive</button></div>
+
+<section id="send">
+ <div class="card">
+  <input type="file" id="file" accept="image/*">
+  <label>Max QR codes (chunks) per image</label>
+  <select id="maxc"><option>16</option><option>64</option><option>128</option><option selected>256</option></select>
+  <label>Characters per QR</label>
+  <select id="csz"><option>400</option><option selected>500</option><option>600</option><option>800</option></select>
+  <button class="pri" id="go" style="width:100%;margin-top:10px">Convert &amp; generate QR</button>
+  <div class="stats" id="stats"></div>
+ </div>
+ <div class="card center hide" id="player">
+  <canvas id="qr" width="480" height="480" style="width:min(100%,380px);height:auto"></canvas>
+  <div class="msg" id="fr">—</div>
+  <label>Speed: <span id="fpsv">6</span> frames/sec</label>
+  <input type="range" id="fps" min="2" max="12" value="6">
+  <div class="row" style="margin-top:8px"><button id="pp">Pause</button><button id="loop">Test loopback</button></div>
+ </div>
+</section>
+
+<section id="recv" class="hide">
+ <div class="card">
+  <video id="vid" playsinline muted class="hide"></video>
+  <canvas id="grab" class="hide"></canvas>
+  <div class="row"><button class="pri" id="cam">Start camera</button><button id="rst">Reset</button></div>
+  <div class="bar"><i id="pb"></i></div>
+  <div class="msg" id="pt">Waiting for chunks…</div>
+ </div>
+ <div class="card center hide" id="out">
+  <canvas id="img" width="256" height="256"></canvas>
+  <div class="row" style="margin-top:8px"><button class="pri" id="save">Save PNG</button></div>
+ </div>
+</section>
+</main>
+
+<script>
+const $=id=>document.getElementById(id);
+let CHUNK=500;
+let chunks=[],fi=0,timer=null,paused=false,fps=6;
+
+// ---- tabs
+function tab(s){$('send').classList.toggle('hide',!s);$('recv').classList.toggle('hide',s);
+ $('tS').classList.toggle('on',s);$('tR').classList.toggle('on',!s);if(s)stopCam();}
+$('tS').onclick=()=>tab(true);$('tR').onclick=()=>tab(false);
+
+// ---- helpers
+const toB64=u=>{let s='';for(let i=0;i<u.length;i+=8192)s+=String.fromCharCode.apply(null,u.subarray(i,i+8192));return btoa(s)};
+const fromB64=b=>Uint8Array.from(atob(b),c=>c.charCodeAt(0));
+async function pipe(data,stream){const w=stream.writable.getWriter();w.write(data);w.close();return new Uint8Array(await new Response(stream.readable).arrayBuffer())}
+const gz=s=>pipe(new TextEncoder().encode(s),new CompressionStream('gzip'));
+const gunz=async u=>new TextDecoder().decode(await pipe(u,new DecompressionStream('gzip')));
+
+// ---- sender
+$('go').onclick=async()=>{
+ const f=$('file').files[0]; if(!f){$('stats').textContent='Pick an image first.';return}
+ CHUNK=+$('csz').value;const maxC=+$('maxc').value;
+ $('stats').textContent='Optimizing detail…';
+ const bmp=await createImageBitmap(f);
+ const enc=async(d,q)=>{const sc=Math.min(1,d/Math.max(bmp.width,bmp.height));
+  const w=Math.max(1,Math.round(bmp.width*sc)),h=Math.max(1,Math.round(bmp.height*sc));
+  const c=document.createElement('canvas');c.width=w;c.height=h;const x=c.getContext('2d');
+  x.fillStyle='#fff';x.fillRect(0,0,w,h);x.drawImage(bmp,0,0,w,h);
+  const blob=await new Promise(r=>c.toBlob(r,'image/jpeg',q));
+  const jb=toB64(new Uint8Array(await blob.arrayBuffer()));
+  const json=JSON.stringify({v:2,w,h,d:jb});const bin=await gz(json);const b64=toB64(bin);
+  return {w,h,q,json,bin,b64,n:Math.ceil(b64.length/CHUNK)}};
+ let best=null;
+ for(const d of [1024,800,640,512,400,320,256,192,128,96,64]){
+  const r=await enc(d,0.55);if(r.n>maxC)continue;
+  best=r;let lo=0.55,hi=0.92;
+  for(let k=0;k<4;k++){const m=(lo+hi)/2;const t=await enc(d,m);if(t.n<=maxC){best=t;lo=m}else hi=m}
+  break}
+ if(!best)best=await enc(48,0.3);
+ const {json,bin,b64}=best;
+ const id='I'+Math.random().toString(36).slice(2,5);
+ const total=best.n;
+ chunks=[];for(let i=0;i<total;i++)chunks.push(`${id}|${i+1}|${total}|${b64.slice(i*CHUNK,(i+1)*CHUNK)}`);
+ $('stats').innerHTML=`<span>Image</span><b>${best.w}×${best.h} · q${Math.round(best.q*100)}</b><span>JSON</span><b>${(json.length/1024).toFixed(1)} KB</b><span>Gzipped</span><b>${(bin.length/1024).toFixed(1)} KB</b><span>Base64</span><b>${(b64.length/1024).toFixed(1)} KB</b><span>Chunks</span><b>${total} · est. ${(total/fps).toFixed(0)}s</b>`;
+ $('player').classList.remove('hide');fi=0;paused=false;$('pp').textContent='Pause';run();
+};
+function drawQR(s){
+ const q=qrcode(0,'L');q.addData(s);q.make();
+ const cv=$('qr'),x=cv.getContext('2d'),m=q.getModuleCount(),qz=4,sz=Math.floor(cv.width/(m+qz*2));
+ const off=Math.floor((cv.width-sz*(m+qz*2))/2);
+ x.fillStyle='#fff';x.fillRect(0,0,cv.width,cv.height);x.fillStyle='#000';
+ for(let r=0;r<m;r++)for(let c=0;c<m;c++)if(q.isDark(r,c))x.fillRect(off+(c+qz)*sz,off+(r+qz)*sz,sz,sz);
+}
+function run(){clearInterval(timer);const t=()=>{if(!paused&&chunks.length){drawQR(chunks[fi]);$('fr').textContent=`Frame ${fi+1} / ${chunks.length}`;fi=(fi+1)%chunks.length}};t();timer=setInterval(t,1000/fps)}
+$('fps').oninput=e=>{fps=+e.target.value;$('fpsv').textContent=fps;if(chunks.length)run()};
+$('pp').onclick=()=>{paused=!paused;$('pp').textContent=paused?'Resume':'Pause'};
+$('loop').onclick=()=>{tab(false);reset();chunks.forEach(ingest)};
+
+// ---- receiver
+let map=new Map(),curId=null,total=0,done=false,stream=null,raf=null;
+function reset(){map=new Map();curId=null;total=0;done=false;$('pb').style.width='0';$('pt').textContent='Waiting for chunks…';$('out').classList.add('hide')}
+$('rst').onclick=reset;
+async function ingest(str){
+ const a=str.split('|');if(a.length<4)return;
+ const [id,i,n]=[a[0],+a[1],+a[2]];if(!i||!n)return;
+ if(id!==curId){reset();curId=id;total=n}
+ if(done||map.has(i))return;
+ map.set(i,a.slice(3).join('|'));
+ $('pb').style.width=(map.size/total*100)+'%';
+ $('pt').textContent=`Scanned ${map.size} of ${total} chunks`;
+ if(map.size===total){done=true;stopCam();await rebuild()}
+}
+async function rebuild(){
+ try{
+  let b='';for(let i=1;i<=total;i++)b+=map.get(i);
+  const o=JSON.parse(await gunz(fromB64(b)));
+  const bm=await createImageBitmap(new Blob([fromB64(o.d)],{type:'image/jpeg'}));
+  const v=$('img');v.width=o.w;v.height=o.h;v.getContext('2d').drawImage(bm,0,0);
+  $('out').classList.remove('hide');$('pt').textContent=`Done · ${total} chunks · ${o.w}×${o.h}`;
+ }catch(e){$('pt').textContent='Rebuild failed: '+e.message}
+}
+$('save').onclick=()=>{const a=document.createElement('a');a.download='rebuilt.png';a.href=$('img').toDataURL();a.click()};
+$('cam').onclick=async()=>{
+ try{
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
+  const v=$('vid');v.srcObject=stream;v.classList.remove('hide');await v.play();scan();
+ }catch(e){$('pt').textContent='Camera unavailable here ('+e.name+'). Use “Test loopback” on the Send tab, or open this page in a normal browser tab.'}
+};
+function scan(){
+ const v=$('vid'),c=$('grab'),x=c.getContext('2d',{willReadFrequently:true});
+ const loop=()=>{
+  if(!stream)return;
+  if(v.videoWidth){c.width=v.videoWidth;c.height=v.videoHeight;x.drawImage(v,0,0);
+   const r=jsQR(x.getImageData(0,0,c.width,c.height).data,c.width,c.height);if(r&&r.data)ingest(r.data)}
+  raf=requestAnimationFrame(loop)};loop();
+}
+function stopCam(){if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}cancelAnimationFrame(raf);$('vid').classList.add('hide')}
+if('serviceWorker' in navigator)addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
+</script>
+</body>
+</html>

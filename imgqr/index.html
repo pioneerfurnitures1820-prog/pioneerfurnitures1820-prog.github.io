@@ -55,15 +55,15 @@ video{width:100%;border-radius:10px;background:#000}
   <label>Max QR codes (chunks) per image</label>
   <select id="maxc"><option>16</option><option>64</option><option>128</option><option selected>256</option></select>
   <label>Characters per QR</label>
-  <select id="csz"><option>400</option><option selected>500</option><option>600</option><option>800</option></select>
+  <select id="csz"><option>150</option><option selected>250</option><option>400</option><option>500</option></select>
   <button class="pri" id="go" style="width:100%;margin-top:10px">Convert &amp; generate QR</button>
   <div class="stats" id="stats"></div>
  </div>
  <div class="card center hide" id="player">
-  <canvas id="qr" width="480" height="480" style="width:min(100%,380px);height:auto"></canvas>
+  <canvas id="qr" width="1000" height="1000" style="width:100%;max-width:480px;height:auto;image-rendering:pixelated"></canvas>
   <div class="msg" id="fr">—</div>
-  <label>Speed: <span id="fpsv">6</span> frames/sec</label>
-  <input type="range" id="fps" min="2" max="12" value="6">
+  <label>Speed: <span id="fpsv">4</span> frames/sec</label>
+  <input type="range" id="fps" min="1" max="10" value="4">
   <div class="row" style="margin-top:8px"><button id="pp">Pause</button><button id="loop">Test loopback</button></div>
  </div>
 </section>
@@ -85,8 +85,8 @@ video{width:100%;border-radius:10px;background:#000}
 
 <script>
 const $=id=>document.getElementById(id);
-let CHUNK=500;
-let chunks=[],fi=0,timer=null,paused=false,fps=6;
+let CHUNK=250;
+let chunks=[],fi=0,timer=null,paused=false,fps=4;
 
 // ---- tabs
 function tab(s){$('send').classList.toggle('hide',!s);$('recv').classList.toggle('hide',s);
@@ -129,8 +129,8 @@ $('go').onclick=async()=>{
  $('player').classList.remove('hide');fi=0;paused=false;$('pp').textContent='Pause';run();
 };
 function drawQR(s){
- const q=qrcode(0,'L');q.addData(s);q.make();
- const cv=$('qr'),x=cv.getContext('2d'),m=q.getModuleCount(),qz=4,sz=Math.floor(cv.width/(m+qz*2));
+ const q=qrcode(0,'M');q.addData(s);q.make();
+ const cv=$('qr'),x=cv.getContext('2d'),m=q.getModuleCount(),qz=4,sz=Math.max(1,Math.floor(cv.width/(m+qz*2)));
  const off=Math.floor((cv.width-sz*(m+qz*2))/2);
  x.fillStyle='#fff';x.fillRect(0,0,cv.width,cv.height);x.fillStyle='#000';
  for(let r=0;r<m;r++)for(let c=0;c<m;c++)if(q.isDark(r,c))x.fillRect(off+(c+qz)*sz,off+(r+qz)*sz,sz,sz);
@@ -151,7 +151,8 @@ async function ingest(str){
  if(done||map.has(i))return;
  map.set(i,a.slice(3).join('|'));
  $('pb').style.width=(map.size/total*100)+'%';
- $('pt').textContent=`Scanned ${map.size} of ${total} chunks`;
+ const miss=[];for(let k=1;k<=total&&miss.length<12;k++)if(!map.has(k))miss.push(k);
+ $('pt').textContent=`Scanned ${map.size} of ${total} chunks`+(miss.length?` · still need: ${miss.join(', ')}${map.size<total-12?'…':''}`:'');
  if(map.size===total){done=true;stopCam();await rebuild()}
 }
 async function rebuild(){
@@ -164,18 +165,40 @@ async function rebuild(){
  }catch(e){$('pt').textContent='Rebuild failed: '+e.message}
 }
 $('save').onclick=()=>{const a=document.createElement('a');a.download='rebuilt.png';a.href=$('img').toDataURL();a.click()};
+let frames=0,bd=null,busy=false;
+const standalone=navigator.standalone||matchMedia('(display-mode: standalone)').matches;
+function camErr(e){const n=(e&&e.name)||'Error';
+ let t='Camera could not start ('+n+(e&&e.message?': '+e.message:'')+'). ';
+ if(n==='NotAllowedError')t+='Allow camera access: iPhone Settings > Safari > Camera > Allow, then reload. ';
+ if(standalone)t+='If it still fails from the Home Screen icon, open the link in Safari itself and use Receive there.';
+ $('pt').textContent=t;}
 $('cam').onclick=async()=>{
+ stopCam();$('pt').textContent='Starting camera…';
  try{
-  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
-  const v=$('vid');v.srcObject=stream;v.classList.remove('hide');await v.play();scan();
- }catch(e){$('pt').textContent='Camera unavailable here ('+e.name+'). Use “Test loopback” on the Send tab, or open this page in a normal browser tab.'}
+  try{stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}}})}
+  catch(e1){if(e1.name==='NotAllowedError')throw e1;stream=await navigator.mediaDevices.getUserMedia({audio:false,video:true})}
+  const v=$('vid');v.setAttribute('playsinline','');v.setAttribute('autoplay','');v.muted=true;
+  v.srcObject=stream;v.classList.remove('hide');
+  try{await v.play()}catch(e){}
+  if('BarcodeDetector' in window){try{const f=await BarcodeDetector.getSupportedFormats();if(f.includes('qr_code'))bd=new BarcodeDetector({formats:['qr_code']})}catch(e){bd=null}}
+  frames=0;$('pt').textContent=total?`Scanned ${map.size} of ${total} chunks`:'Camera on · point it at the QR on the other phone';
+  scan();
+ }catch(e){stopCam();camErr(e)}
 };
 function scan(){
  const v=$('vid'),c=$('grab'),x=c.getContext('2d',{willReadFrequently:true});
- const loop=()=>{
+ const loop=async()=>{
   if(!stream)return;
-  if(v.videoWidth){c.width=v.videoWidth;c.height=v.videoHeight;x.drawImage(v,0,0);
-   const r=jsQR(x.getImageData(0,0,c.width,c.height).data,c.width,c.height);if(r&&r.data)ingest(r.data)}
+  if(!busy&&v.videoWidth&&v.readyState>=2){busy=true;
+   try{
+    if(bd){const r=await bd.detect(v);for(const b of r)if(b.rawValue)ingest(b.rawValue)}
+    else{const vw=v.videoWidth,vh=v.videoHeight,side=Math.min(vw,vh),sc=Math.min(1,720/side),o=Math.round(side*sc);
+     if(c.width!==o){c.width=o;c.height=o}
+     x.drawImage(v,(vw-side)/2,(vh-side)/2,side,side,0,0,o,o);
+     const r=jsQR(x.getImageData(0,0,o,o).data,o,o,{inversionAttempts:'dontInvert'});if(r&&r.data)ingest(r.data)}
+   }catch(e){}
+   frames++;if(!total&&frames%30===0)$('pt').textContent=`Camera on · looking for QR… (${frames} frames checked)`;
+   busy=false}
   raf=requestAnimationFrame(loop)};loop();
 }
 function stopCam(){if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}cancelAnimationFrame(raf);$('vid').classList.add('hide')}
